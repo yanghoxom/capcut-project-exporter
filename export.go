@@ -520,6 +520,16 @@ func resolveCompoundSegments(compoundSeg, compoundMat map[string]interface{}, dr
 			iFv := getBool(getMapDef(ic, "flip"), "vertical", false)
 			iSpd := getFloat(seg, "speed", 1.0)
 
+			// Compose inner position with outer rotation before adding outer offset.
+			// If the outer compound clip is rotated, the inner clip's position (iTx, iTy)
+			// lives in the outer clip's local coordinate frame and must be rotated accordingly.
+			rotatedTx, rotatedTy := iTx, iTy
+			if math.Abs(oRot) > 0.01 {
+				rad := oRot * math.Pi / 180.0
+				rotatedTx = iTx*math.Cos(rad) - iTy*math.Sin(rad)
+				rotatedTy = iTx*math.Sin(rad) + iTy*math.Cos(rad)
+			}
+
 			composedSeg := map[string]interface{}{
 				"source_timerange": map[string]interface{}{
 					"start":    float64(srcStart),
@@ -528,7 +538,7 @@ func resolveCompoundSegments(compoundSeg, compoundMat map[string]interface{}, dr
 				"speed": iSpd * oSpd,
 				"clip": map[string]interface{}{
 					"scale":     map[string]interface{}{"x": iSx * oSx, "y": iSy * oSy},
-					"transform": map[string]interface{}{"x": iTx*oSx + oTx, "y": iTy*oSy + oTy},
+					"transform": map[string]interface{}{"x": rotatedTx*oSx + oTx, "y": rotatedTy*oSy + oTy},
 					"rotation":  iRot + oRot,
 					"flip":      map[string]interface{}{"horizontal": iFh != oFh, "vertical": iFv != oFv},
 				},
@@ -726,15 +736,17 @@ func exportCompoundSegment(
 			canvasW, canvasH, outW, outH, fps, useGPU, dryRun, onProgress)
 	}
 
-	// Collect unique source files
-	srcIndex := make(map[string]int)
+	// Collect unique source files and count how many times each is used
+	srcIndex := make(map[string]int) // path -> input index
 	var srcList []string
+	srcUsage := make(map[string]int) // path -> total usage count
 	for _, is := range innerSegs {
 		p := getString(is.Mat, "path", "")
 		if _, exists := srcIndex[p]; !exists {
 			srcIndex[p] = len(srcList)
 			srcList = append(srcList, p)
 		}
+		srcUsage[p]++
 	}
 
 	cmd := []string{ffmpegBin, "-y"}
@@ -745,21 +757,47 @@ func exportCompoundSegment(
 		cmd = append(cmd, "-i", path)
 	}
 
+	// For sources used more than once we need a split filter so the same
+	// input stream isn't consumed twice (invalid in FFmpeg filter_complex).
+	splitLabels := make(map[string][]string) // path -> per-use label list
+	splitUseIdx := make(map[string]int)       // path -> next label to hand out
 	var filterParts []string
+	for p, idx := range srcIndex {
+		n := srcUsage[p]
+		if n < 2 {
+			continue
+		}
+		labels := make([]string, n)
+		for i := range labels {
+			labels[i] = fmt.Sprintf("[src%d_%d]", idx, i)
+		}
+		splitLabels[p] = labels
+		filterParts = append(filterParts,
+			fmt.Sprintf("[%d:v]split=%d%s", idx, n, strings.Join(labels, "")))
+	}
+
 	var segLabels []string
 
 	for i, is := range innerSegs {
-		si := srcIndex[getString(is.Mat, "path", "")]
+		p := getString(is.Mat, "path", "")
+		var inputRef string
+		if labels, ok := splitLabels[p]; ok {
+			inputRef = labels[splitUseIdx[p]]
+			splitUseIdx[p]++
+		} else {
+			inputRef = fmt.Sprintf("[%d:v]", srcIndex[p])
+		}
+
 		srcStartS := getFloat(getMapDef(is.Seg, "source_timerange"), "start", 0) / 1_000_000
 		srcDurS := getFloat(getMapDef(is.Seg, "source_timerange"), "duration", 0) / 1_000_000
 
-		probe := probeVideo(getString(is.Mat, "path", ""))
+		probe := probeVideo(p)
 		vf := buildVF(is.Seg, probe.Width, probe.Height, canvasW, canvasH, outW, outH)
 
 		trimPart := fmt.Sprintf("trim=start=%.6f:duration=%.6f,setpts=PTS-STARTPTS", srcStartS, srcDurS)
 		fullVF := fmt.Sprintf("%s,%s", trimPart, vf)
 		label := fmt.Sprintf("vc%d", i)
-		filterParts = append(filterParts, fmt.Sprintf("[%d:v]%s[%s]", si, fullVF, label))
+		filterParts = append(filterParts, fmt.Sprintf("%s%s[%s]", inputRef, fullVF, label))
 		segLabels = append(segLabels, fmt.Sprintf("[%s]", label))
 	}
 
