@@ -797,7 +797,8 @@ func exportCompoundSegment(
 		trimPart := fmt.Sprintf("trim=start=%.6f:duration=%.6f,setpts=PTS-STARTPTS", srcStartS, srcDurS)
 		fullVF := fmt.Sprintf("%s,%s", trimPart, vf)
 		label := fmt.Sprintf("vc%d", i)
-		filterParts = append(filterParts, fmt.Sprintf("%s%s[%s]", inputRef, fullVF, label))
+		// setsar=1 normalises SAR so concat doesn't reject mismatched ratios
+		filterParts = append(filterParts, fmt.Sprintf("%s%s,setsar=1[%s]", inputRef, fullVF, label))
 		segLabels = append(segLabels, fmt.Sprintf("[%s]", label))
 	}
 

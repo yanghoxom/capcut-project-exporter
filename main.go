@@ -208,6 +208,7 @@ type UI struct {
 	outputBrowseBtn  widget.Clickable
 	exportBtn        widget.Clickable
 	clearLogBtn      widget.Clickable
+	copyLogBtn       widget.Clickable
 	openOutBtn       widget.Clickable
 
 	paypalCopyBtn widget.Clickable
@@ -532,6 +533,10 @@ func (u *UI) drawLog(gtx layout.Context) layout.Dimensions {
 	if u.clearLogBtn.Clicked(gtx) {
 		u.cApp.clearLog()
 	}
+	if u.copyLogBtn.Clicked(gtx) {
+		lines := u.cApp.getLogLines()
+		copyToClipboardLarge(strings.Join(lines, "\n"))
+	}
 
 	lines := u.cApp.getLogLines()
 	if len(lines) == 0 {
@@ -549,6 +554,12 @@ func (u *UI) drawLog(gtx layout.Context) layout.Dimensions {
 					lbl.Font.Weight = font.Bold
 					return lbl.Layout(gtx)
 				}),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					btn := material.Button(u.th, &u.copyLogBtn, "Copy All")
+					btn.Background = color.NRGBA{R: 60, G: 100, B: 160, A: 255}
+					return btn.Layout(gtx)
+				}),
+				layout.Rigid(spacer(6)),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 					btn := material.Button(u.th, &u.clearLogBtn, "Clear")
 					btn.Background = color.NRGBA{R: 120, G: 120, B: 120, A: 255}
@@ -789,6 +800,14 @@ func copyToClipboard(text string) {
 	cmd := exec.Command("powershell", "-NoProfile", "-Command",
 		fmt.Sprintf(`Set-Clipboard '%s'`, strings.ReplaceAll(text, `'`, `''`)))
 	cmd.SysProcAttr = noWindow
+	cmd.Run()
+}
+
+// copyToClipboardLarge pipes content to clip.exe so arbitrary text length works.
+func copyToClipboardLarge(content string) {
+	cmd := exec.Command("clip")
+	cmd.SysProcAttr = noWindow
+	cmd.Stdin = strings.NewReader(content)
 	cmd.Run()
 }
 
