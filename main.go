@@ -57,6 +57,16 @@ type CapcutApp struct {
 
 	jobsDone  int32
 	jobsTotal int32
+
+	// FFmpeg paths (empty = use system PATH)
+	ffmpegPath  string
+	ffprobePath string
+
+	// FFmpeg download state
+	downloading    bool
+	downloadPct    float64
+	downloadMsg    string
+	downloadMu     sync.Mutex
 }
 
 func (a *CapcutApp) appendLog(msg string) {
@@ -67,6 +77,47 @@ func (a *CapcutApp) appendLog(msg string) {
 	}
 	a.logMu.Unlock()
 	a.win.Invalidate()
+}
+
+func (a *CapcutApp) ensureFFmpeg() {
+	ff, ffp := FindFFmpeg()
+	if ff != "" {
+		a.ffmpegPath = ff
+		a.ffprobePath = ffp
+		a.appendLog("[OK] FFmpeg found: " + ff)
+		return
+	}
+
+	a.downloadMu.Lock()
+	a.downloading = true
+	a.downloadPct = 0
+	a.downloadMsg = "FFmpeg not found — downloading..."
+	a.downloadMu.Unlock()
+	a.win.Invalidate()
+
+	go func() {
+		err := DownloadFFmpeg(func(pct float64, msg string) {
+			a.downloadMu.Lock()
+			a.downloadPct = pct
+			a.downloadMsg = msg
+			a.downloadMu.Unlock()
+			a.win.Invalidate()
+		})
+
+		a.downloadMu.Lock()
+		a.downloading = false
+		a.downloadMu.Unlock()
+
+		if err != nil {
+			a.appendLog("[ERROR] FFmpeg download failed: " + err.Error())
+		} else {
+			ff, ffp := FindFFmpeg()
+			a.ffmpegPath = ff
+			a.ffprobePath = ffp
+			a.appendLog("[OK] FFmpeg downloaded and ready!")
+		}
+		a.win.Invalidate()
+	}()
 }
 
 func (a *CapcutApp) clearLog() {
@@ -93,6 +144,8 @@ func (a *CapcutApp) startExport(opts ExportOptions) {
 	a.exportMu.Unlock()
 
 	SaveConfig(Config{ProjectDir: opts.ProjectDir, OutputDir: opts.OutputDir})
+	opts.FFmpegPath = a.ffmpegPath
+	opts.FFprobePath = a.ffprobePath
 
 	// Initialize worker panel
 	n := opts.Workers
@@ -215,6 +268,7 @@ func (u *UI) frame(gtx layout.Context) layout.Dimensions {
 				layout.Rigid(spacer(10)),
 				layout.Rigid(u.drawExportRow),
 				layout.Rigid(spacer(8)),
+				layout.Rigid(u.drawFFmpegStatus),
 				layout.Rigid(u.drawWorkers),
 				layout.Rigid(spacer(8)),
 				layout.Rigid(divider),
@@ -411,7 +465,11 @@ func (u *UI) drawExportRow(gtx layout.Context) layout.Dimensions {
 	exporting := u.cApp.exporting
 	u.cApp.exportMu.Unlock()
 
-	if u.exportBtn.Clicked(gtx) && !exporting {
+	u.cApp.downloadMu.Lock()
+	downloading := u.cApp.downloading
+	u.cApp.downloadMu.Unlock()
+
+	if u.exportBtn.Clicked(gtx) && !exporting && !downloading {
 		if u.cApp.projectDir == "" || u.cApp.outputDir == "" {
 			u.cApp.appendLog("[ERROR] Please select both project and output directories")
 		} else {
@@ -440,7 +498,9 @@ func (u *UI) drawExportRow(gtx layout.Context) layout.Dimensions {
 	}
 
 	btnLabel := "Export"
-	if exporting {
+	if downloading {
+		btnLabel = "Downloading FFmpeg..."
+	} else if exporting {
 		btnLabel = "Exporting..."
 	}
 
@@ -449,7 +509,7 @@ func (u *UI) drawExportRow(gtx layout.Context) layout.Dimensions {
 			return layout.Center.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 				gtx.Constraints.Min.X = gtx.Dp(200)
 				btn := material.Button(u.th, &u.exportBtn, btnLabel)
-				if exporting {
+				if exporting || downloading {
 					btn.Background = color.NRGBA{R: 150, G: 150, B: 150, A: 255}
 				} else {
 					btn.Background = color.NRGBA{R: 0, G: 120, B: 212, A: 255}
@@ -540,6 +600,37 @@ func logLineColor(line string) color.NRGBA {
 }
 
 // ── Workers panel ─────────────────────────────────────────────────────────────
+
+// ─── FFmpeg status / download bar ────────────────────────────────────────────
+
+func (u *UI) drawFFmpegStatus(gtx layout.Context) layout.Dimensions {
+	u.cApp.downloadMu.Lock()
+	downloading := u.cApp.downloading
+	pct := u.cApp.downloadPct
+	msg := u.cApp.downloadMsg
+	u.cApp.downloadMu.Unlock()
+
+	if !downloading {
+		return layout.Dimensions{}
+	}
+
+	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			lbl := material.Body2(u.th, msg)
+			lbl.TextSize = unit.Sp(12)
+			lbl.Color = color.NRGBA{R: 60, G: 60, B: 60, A: 255}
+			return lbl.Layout(gtx)
+		}),
+		layout.Rigid(layout.Spacer{Height: unit.Dp(4)}.Layout),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			bar := material.ProgressBar(u.th, float32(pct))
+			bar.Color = color.NRGBA{R: 255, G: 140, B: 0, A: 255}
+			bar.TrackColor = color.NRGBA{R: 220, G: 220, B: 220, A: 255}
+			return bar.Layout(gtx)
+		}),
+		layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
+	)
+}
 
 func (u *UI) drawWorkers(gtx layout.Context) layout.Dimensions {
 	u.cApp.workersMu.Lock()
@@ -838,6 +929,9 @@ func main() {
 		ca.outputDir = cfg.OutputDir
 
 		ui := newUI(ca)
+
+		// Auto-detect or download FFmpeg in background
+		go ca.ensureFFmpeg()
 
 		var ops op.Ops
 		for {

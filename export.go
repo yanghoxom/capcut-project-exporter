@@ -175,6 +175,9 @@ type ProbeResult struct {
 var (
 	probeCache   = make(map[string]ProbeResult)
 	probeCacheMu sync.Mutex
+	// set by RunExport from ExportOptions
+	ffmpegBin  = "ffmpeg"
+	ffprobeBin = "ffprobe"
 )
 
 func probeVideo(path string) ProbeResult {
@@ -186,7 +189,7 @@ func probeVideo(path string) ProbeResult {
 	probeCacheMu.Unlock()
 
 	result := ProbeResult{}
-	cmd := exec.Command("ffprobe", "-v", "quiet", "-print_format", "json",
+	cmd := exec.Command(ffprobeBin, "-v", "quiet", "-print_format", "json",
 		"-show_streams", "-select_streams", "v:0", path)
 	cmd.SysProcAttr = noWindow
 	out, err := cmd.Output()
@@ -734,7 +737,7 @@ func exportCompoundSegment(
 		}
 	}
 
-	cmd := []string{"ffmpeg", "-y"}
+	cmd := []string{ffmpegBin, "-y"}
 	for _, path := range srcList {
 		if useGPU {
 			cmd = append(cmd, "-hwaccel", "cuda")
@@ -823,7 +826,7 @@ func exportCompoundSegment(
 // ---------------------------------------------------------------------------
 
 func buildFFmpegCmd(srcPath, outputPath, vf string, startS, durS float64, fps, outW, outH int, useGPU bool) []string {
-	cmd := []string{"ffmpeg", "-y"}
+	cmd := []string{ffmpegBin, "-y"}
 	cmd = append(cmd, "-ss", fmt.Sprintf("%.6f", startS), "-t", fmt.Sprintf("%.6f", durS))
 	if useGPU {
 		cmd = append(cmd, "-hwaccel", "cuda")
@@ -968,6 +971,8 @@ type ExportOptions struct {
 	Workers      int    `json:"workers"`
 	UseGPU       bool   `json:"use_gpu"`
 	DryRun       bool   `json:"dry_run"`
+	FFmpegPath   string `json:"ffmpeg_path"`
+	FFprobePath  string `json:"ffprobe_path"`
 	Log          func(string)                                                         `json:"-"`
 	// WorkerUpdate reports per-worker state: id (1-based), clip label (folder/file),
 	// jobNum (e.g. "3/12"), progress [0,1], encoder ("GPU"/"CPU"), idle flag.
@@ -982,6 +987,20 @@ func (o *ExportOptions) log(format string, args ...interface{}) {
 	}
 }
 
+func (o *ExportOptions) ffmpeg() string {
+	if o.FFmpegPath != "" {
+		return o.FFmpegPath
+	}
+	return "ffmpeg"
+}
+
+func (o *ExportOptions) ffprobe() string {
+	if o.FFprobePath != "" {
+		return o.FFprobePath
+	}
+	return "ffprobe"
+}
+
 type Job struct {
 	Label      string
 	OutputPath string
@@ -994,6 +1013,10 @@ type Job struct {
 }
 
 func RunExport(opts ExportOptions) {
+	// Set binary paths for this run
+	ffmpegBin = opts.ffmpeg()
+	ffprobeBin = opts.ffprobe()
+
 	// Clear probe cache each run
 	probeCacheMu.Lock()
 	probeCache = make(map[string]ProbeResult)
