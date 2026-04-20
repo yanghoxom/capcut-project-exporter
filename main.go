@@ -217,7 +217,8 @@ type UI struct {
 	useGPU widget.Bool
 	dryRun widget.Bool
 
-	logList widget.List
+	logEditor   widget.Editor
+	lastLogCount int
 
 	paypalQR paint.ImageOp
 	bmcQR    paint.ImageOp
@@ -238,7 +239,8 @@ func newUI(ca *CapcutApp) *UI {
 	u.workersEditor.SetText("4")
 	u.trackEditor.SingleLine = true
 	u.useGPU.Value = true
-	u.logList.Axis = layout.Vertical
+	u.logEditor.ReadOnly = true
+	u.logEditor.SingleLine = false
 
 	if qr, err := qrcode.New("https://paypal.me/daovanhungblogger", qrcode.High); err == nil {
 		u.paypalQR = paint.NewImageOp(qr.Image(220))
@@ -532,6 +534,8 @@ func (u *UI) drawExportRow(gtx layout.Context) layout.Dimensions {
 func (u *UI) drawLog(gtx layout.Context) layout.Dimensions {
 	if u.clearLogBtn.Clicked(gtx) {
 		u.cApp.clearLog()
+		u.logEditor.SetText("")
+		u.lastLogCount = 0
 	}
 	if u.copyLogBtn.Clicked(gtx) {
 		lines := u.cApp.getLogLines()
@@ -543,7 +547,14 @@ func (u *UI) drawLog(gtx layout.Context) layout.Dimensions {
 		lines = []string{"Ready. Select project and output directories, then click Export."}
 	}
 
-	wasAtEnd := !u.logList.Position.BeforeEnd
+	// Sync editor text when log changes; move caret to end so view follows output.
+	if len(lines) != u.lastLogCount {
+		newText := strings.Join(lines, "\n")
+		u.logEditor.SetText(newText)
+		n := len([]rune(newText))
+		u.logEditor.SetCaret(n, n)
+		u.lastLogCount = len(lines)
+	}
 
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 		// Header
@@ -568,46 +579,22 @@ func (u *UI) drawLog(gtx layout.Context) layout.Dimensions {
 			)
 		}),
 		layout.Rigid(spacer(4)),
-		// Log content
+		// Log content — read-only editor so text is selectable (mouse drag + Ctrl+C)
 		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 			paint.FillShape(gtx.Ops, color.NRGBA{R: 30, G: 30, B: 30, A: 255},
 				clip.Rect{Max: gtx.Constraints.Max}.Op())
 
-			dims := layout.UniformInset(unit.Dp(6)).Layout(gtx,
+			return layout.UniformInset(unit.Dp(6)).Layout(gtx,
 				func(gtx layout.Context) layout.Dimensions {
-					return material.List(u.th, &u.logList).Layout(gtx, len(lines),
-						func(gtx layout.Context, index int) layout.Dimensions {
-							lbl := material.Body2(u.th, lines[index])
-							lbl.TextSize = unit.Sp(12)
-							lbl.Color = logLineColor(lines[index])
-							return lbl.Layout(gtx)
-						},
-					)
+					ed := material.Editor(u.th, &u.logEditor, "")
+					ed.TextSize = unit.Sp(12)
+					ed.Color = color.NRGBA{R: 210, G: 210, B: 215, A: 255}
+					ed.SelectionColor = color.NRGBA{R: 60, G: 120, B: 200, A: 180}
+					return ed.Layout(gtx)
 				},
 			)
-
-			if wasAtEnd && len(lines) > 1 {
-				u.logList.Position.First = len(lines) - 1
-				u.logList.Position.BeforeEnd = false
-			}
-			return dims
 		}),
 	)
-}
-
-func logLineColor(line string) color.NRGBA {
-	switch {
-	case strings.Contains(line, "[ERROR]") || strings.Contains(line, "[x]"):
-		return color.NRGBA{R: 255, G: 100, B: 100, A: 255}
-	case strings.Contains(line, "[!]"):
-		return color.NRGBA{R: 255, G: 180, B: 80, A: 255}
-	case strings.Contains(line, "Done:") || strings.Contains(line, "done"):
-		return color.NRGBA{R: 100, G: 220, B: 100, A: 255}
-	case strings.Contains(line, "Track:") || strings.Contains(line, "Encoder:") || strings.Contains(line, "Canvas:"):
-		return color.NRGBA{R: 100, G: 180, B: 255, A: 255}
-	default:
-		return color.NRGBA{R: 200, G: 200, B: 210, A: 255}
-	}
 }
 
 // ── Workers panel ─────────────────────────────────────────────────────────────
