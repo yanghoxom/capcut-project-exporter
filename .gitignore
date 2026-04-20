@@ -1,0 +1,8 @@
+# Build output
+*.exe
+
+# User config (contains local paths)
+config.json
+
+# Go cache
+vendor/
